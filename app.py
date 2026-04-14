@@ -131,9 +131,11 @@ def health():
     return jsonify({"status": "ok", "local": os.name == "nt"})
 
 
+# ── INIT ON IMPORT (gunicorn + direct) ───────────────────
+init_db()
+
 # ── MAIN ──────────────────────────────────────────────────
 if __name__ == "__main__":
-    init_db()
     port = int(os.environ.get("PORT", 7474))
     host = os.environ.get("HOST", "0.0.0.0")
     debug = os.environ.get("DEBUG", "false").lower() == "true"
