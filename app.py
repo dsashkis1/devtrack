@@ -35,7 +35,7 @@ def init_db():
 # ── STATIC ───────────────────────────────────────────────
 @app.route("/")
 def index():
-    return send_from_directory("static", "index.html")
+    return app.send_static_file("index.html")
 
 
 # ── API: PROJECTS ─────────────────────────────────────────
