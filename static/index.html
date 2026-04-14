@@ -185,9 +185,10 @@
     <input type="text" id="searchInput" placeholder="חיפוש פרויקט..." oninput="renderCards()">
   </div>
   <div class="topbar-right">
+    <span id="agentStatus" style="font-size:12px;color:var(--text3);">○ Agent לא פעיל</span>
     <button class="btn btn-primary" onclick="openAdd()">+ פרויקט חדש</button>
     <button class="btn" onclick="openJson('export')">↑ JSON</button>
-    <button class="btn" onclick="openJson('import')">↓ שחזור</button>
+    <button class="btn" onclick="openJsonImport()">↓ שחזור</button>
     <span class="save-dot" id="saveDot">—</span>
   </div>
 </div>
@@ -346,17 +347,17 @@
 
 <script>
 // ─── CONFIG ───────────────────────────────────────────────
-// כשמריצים מקובץ HTML ישירות (file://) — localhost:7474
-// כשעולים ל-Render — אותו origin
 const API = window.location.protocol === 'file:'
   ? 'http://localhost:7474'
   : '';
+const AGENT = 'http://127.0.0.1:7475';  // local agent
 
 // ─── STATE ────────────────────────────────────────────────
 let projects = [];
 let curFilter = 'all';
 let isDirty = false;
-let isLocal = false;  // האם השרת מקומי (תומך ב-/api/run)
+let isLocal = false;
+let agentOk = false;  // האם local agent רץ
 
 // ─── API HELPERS ──────────────────────────────────────────
 async function apiFetch(path, opts = {}) {
@@ -376,7 +377,19 @@ async function checkHealth() {
     const h = await apiFetch('/api/health');
     dot.className = 'status-dot ok';
     isLocal = !!h.local;
-    lbl.textContent = isLocal ? 'שרת מקומי ✓' : 'Render ✓';
+    // בדיקת agent
+    try {
+      await fetch(AGENT + '/health', { signal: AbortSignal.timeout(1500) });
+      agentOk = true;
+      lbl.textContent = isLocal ? 'שרת מקומי + Agent ✓' : 'Render + Agent ✓';
+      document.getElementById('agentStatus').textContent = '⚡ Agent פעיל';
+      document.getElementById('agentStatus').style.color = 'var(--green)';
+    } catch {
+      agentOk = false;
+      lbl.textContent = isLocal ? 'שרת מקומי ✓' : 'Render ✓';
+      document.getElementById('agentStatus').textContent = '○ Agent לא פעיל';
+      document.getElementById('agentStatus').style.color = 'var(--text3)';
+    }
   } catch {
     dot.className = 'status-dot err';
     lbl.textContent = 'לא מחובר';
@@ -479,10 +492,10 @@ function renderCards() {
       </div>` : ''}
       ${deps.length ? `<div class="dep-chips">${deps.map(n => `<span class="dep-chip">⛓ ${esc(n)}</span>`).join('')}</div>` : ''}
       ${p.notes ? `<div class="card-notes" onclick="openEdit('${pid}')">${esc(p.notes)}</div>` : ''}
-      ${hasRun ? `<div class="run-bar">
-        ${p.batPath ? `<button class="btn btn-run btn-sm" onclick="runBat('${pid}',event)">▶ הרץ .bat</button>` : ''}
+      ${(hasRun || p.path) ? `<div class="run-bar">
+        ${hasRun ? `<button class="btn btn-run btn-sm" onclick="runBat('${pid}',event)" title="${agentOk ? 'מריץ ישירות' : 'מעתיק פקודה'}">▶ הרץ</button>` : ''}
         ${p.exe ? `<button class="btn btn-bat btn-sm" onclick="dlBatCard('${pid}',event)">⬇ .bat</button>` : ''}
-        ${p.batPath ? `<span class="lbl" title="${esc(p.batPath)}">${esc(p.batPath.split('\\').pop() || p.batPath)}</span>` : ''}
+        ${p.path ? `<button class="btn btn-sm" onclick="openFolderAgent('${pid}',event)" title="פתח תיקייה">📁</button>` : ''}
       </div>` : ''}
       <div class="card-foot">
         <div class="ai-tags">${tags}</div>
@@ -687,16 +700,51 @@ function dlBatCard(pid, event) {
 async function runBat(pid, event) {
   event.stopPropagation();
   const p = projects.find(x => x.id === pid); if (!p) return;
-  if (!p.batPath) { toast('לא הוגדר נתיב .bat'); return; }
-  if (!isLocal) {
+  if (agentOk) {
+    // הרצה דרך local agent
+    try {
+      const body = p.batPath
+        ? { bat_path: p.batPath }
+        : { exe_cmd: p.exe, work_dir: p.path };
+      const res = await fetch(AGENT + '/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(5000)
+      });
+      const data = await res.json();
+      if (data.ok) toast('▶ הופעל!');
+      else toast('שגיאה: ' + (data.error || 'לא ידוע'));
+    } catch (e) { toast('Agent לא מגיב: ' + e.message); }
+  } else if (p.batPath) {
     copyText(p.batPath);
-    toast('הועתק ✓ — הדבק ב-Win+R והרץ');
-    return;
+    toast('Agent לא פעיל — הועתק נתיב .bat\nהדבק ב-Win+R');
+  } else if (p.exe) {
+    const cmd = p.path ? `cd /d "${p.path}" && ${p.exe}` : p.exe;
+    copyText(cmd);
+    toast('Agent לא פעיל — הועתקה פקודה לטרמינל');
+  } else {
+    toast('לא הוגדרה פקודת הרצה');
   }
-  try {
-    await apiFetch('/api/run', { method: 'POST', body: JSON.stringify({ bat_path: p.batPath }) });
-    toast('▶ רץ!');
-  } catch (e) { toast('שגיאה: ' + e.message); }
+}
+
+async function openFolderAgent(pid, event) {
+  event.stopPropagation();
+  const p = projects.find(x => x.id === pid); if (!p || !p.path) return;
+  if (agentOk) {
+    try {
+      await fetch(AGENT + '/open-folder', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: p.path }),
+        signal: AbortSignal.timeout(3000)
+      });
+      toast('📁 נפתח בסייר');
+    } catch { toast('Agent לא מגיב'); }
+  } else {
+    copyText(p.path);
+    toast('Agent לא פעיל — הועתק נתיב');
+  }
 }
 
 // ─── UTILS ────────────────────────────────────────────────
@@ -708,6 +756,32 @@ function handleFilePick(input) { const f = input.files[0]; if (!f) return; const
 function toast(msg) { const el = document.getElementById('toast'); el.textContent = msg; el.classList.add('show'); clearTimeout(el._t); el._t = setTimeout(() => el.classList.remove('show'), 2500); }
 
 // ─── JSON EXPORT / IMPORT ─────────────────────────────────
+function openJsonImport() {
+  // פתח חלון בחירת קובץ אמיתי
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.json';
+  input.onchange = (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async (ev) => {
+      try {
+        const parsed = JSON.parse(ev.target.result);
+        const imp = Array.isArray(parsed) ? parsed : (parsed.projects || null);
+        if (!imp || !imp.length) throw new Error('מבנה JSON לא תקין');
+        if (!confirm(`לייבא ${imp.length} פרויקטים מ-"${file.name}"?\nהנתונים הקיימים יוחלפו.`)) return;
+        for (const p of projects) { try { await apiFetch('/api/projects/' + p.id, { method: 'DELETE' }); } catch {} }
+        for (const p of imp) { try { await apiFetch('/api/projects', { method: 'POST', body: JSON.stringify(p) }); } catch {} }
+        projects = await apiFetch('/api/projects');
+        renderAll();
+        toast(`✓ יובאו ${imp.length} פרויקטים מ-${file.name}`);
+      } catch (e) { toast('שגיאה: ' + e.message); }
+    };
+    reader.readAsText(file);
+  };
+  input.click();
+}
+
 function openJson(mode) {
   const ta = document.getElementById('jsonTa'); document.getElementById('jmsg').textContent = '';
   if (mode === 'export') {
